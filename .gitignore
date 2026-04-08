@@ -1,0 +1,19 @@
+node_modules/
+__pycache__/
+*.pyc
+
+# Logs & data
+logs/
+uploads/
+*.log
+
+# Elasticsearch & Postgres data
+esdata/
+pgdata/
+
+# Env & secrets
+.env
+*.env
+
+# VS Code
+.vscode/

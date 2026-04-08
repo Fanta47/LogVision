@@ -1,0 +1,1 @@
+﻿@timestamp,application_name,log_level,log_origin,thread,context,event_type,query_stage,query_text,sql_operation,sql_table,result_size,update_count,data_source,query_has_placeholders,source_file,analysis_status

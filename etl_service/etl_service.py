@@ -7,7 +7,8 @@ import psycopg2
 from psycopg2.extras import execute_batch
 from elasticsearch import Elasticsearch
 
-ES_URL = os.getenv("ES_URL", "https://es01:9200")
+ES_URLS_RAW = os.getenv("ES_URLS", os.getenv("ES_URL", "https://es01:9200"))
+ES_URLS = [u.strip() for u in ES_URLS_RAW.split(",") if u.strip()]
 ES_INDEX = os.getenv("ES_INDEX", "log-unified-*")
 ES_USERNAME = os.getenv("ES_USERNAME", "elastic")
 ES_PASSWORD = os.getenv("ES_PASSWORD", "changeme123")
@@ -17,6 +18,7 @@ PG_DSN = os.getenv("PG_DSN", "postgresql://logs_user:logs_pass@postgres:5432/log
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "5"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "1000"))
 PIPELINE_NAME = os.getenv("PIPELINE_NAME", "es_to_pg")
+FULL_SYNC_ON_START = os.getenv("FULL_SYNC_ON_START", "true").strip().lower() == "true"
 
 
 def parse_ts(value: str) -> datetime:
@@ -255,96 +257,142 @@ def upsert_rows(conn, rows: List[Dict[str, Any]]) -> Tuple[datetime, str]:
   return parse_ts(last["@timestamp"]), last.get("source_doc_id", "")
 
 
-def fetch_batch(es: Elasticsearch, pit_id: str, after: Optional[List[Any]], last_ts: datetime) -> Dict[str, Any]:
+def fetch_batch(
+  es: Elasticsearch,
+  after: Optional[List[Any]],
+  last_ts: Optional[datetime],
+) -> Dict[str, Any]:
   query = {
     "size": BATCH_SIZE,
+    "track_total_hits": False,
     "sort": [
       {"@timestamp": {"order": "asc", "format": "strict_date_optional_time_nanos"}},
       {"source_doc_id.keyword": {"order": "asc"}},
     ],
-    "query": {
+  }
+  if last_ts is not None:
+    query["query"] = {
       "range": {
         "@timestamp": {
           "gte": last_ts.isoformat()
         }
       }
-    },
-    "pit": {
-      "id": pit_id,
-      "keep_alive": "2m"
     }
-  }
   if after:
     query["search_after"] = after
-  return es.search(body=query)
+  return es.search(
+    index=ES_INDEX,
+    body=query,
+    ignore_unavailable=True,
+    allow_no_indices=True,
+  )
 
 
 def run_once(es: Elasticsearch, conn) -> int:
   last_ts, last_id = get_checkpoint(conn)
   moved = 0
 
-  pit = es.open_point_in_time(index=ES_INDEX, keep_alive="2m")
-  pit_id = pit["id"]
+  after = None
+  batch_docs: List[Dict[str, Any]] = []
 
-  try:
-    after = None
-    batch_docs: List[Dict[str, Any]] = []
+  while True:
+    res = fetch_batch(es, after, last_ts)
+    hits = res.get("hits", {}).get("hits", [])
+    if not hits:
+      break
 
-    while True:
-      res = fetch_batch(es, pit_id, after, last_ts)
-      hits = res.get("hits", {}).get("hits", [])
-      if not hits:
-        break
+    for h in hits:
+      src = h.get("_source", {})
+      ts_raw = src.get("@timestamp")
+      doc_id = src.get("source_doc_id")
+      if not ts_raw or not doc_id:
+        continue
 
-      for h in hits:
-        src = h.get("_source", {})
-        ts_raw = src.get("@timestamp")
-        doc_id = src.get("source_doc_id")
-        if not ts_raw or not doc_id:
-          continue
+      ts = parse_ts(ts_raw)
+      if (ts, doc_id) <= (last_ts, last_id):
+        continue
 
-        ts = parse_ts(ts_raw)
-        if (ts, doc_id) <= (last_ts, last_id):
-          continue
+      batch_docs.append(src)
 
-        batch_docs.append(src)
+    if batch_docs:
+      new_ts, new_id = upsert_rows(conn, batch_docs)
+      set_checkpoint(conn, new_ts, new_id)
+      conn.commit()
+      moved += len(batch_docs)
+      last_ts, last_id = new_ts, new_id
+      batch_docs = []
 
-      if batch_docs:
-        new_ts, new_id = upsert_rows(conn, batch_docs)
-        set_checkpoint(conn, new_ts, new_id)
-        conn.commit()
-        moved += len(batch_docs)
-        last_ts, last_id = new_ts, new_id
-        batch_docs = []
+    after = hits[-1].get("sort")
 
-      after = hits[-1].get("sort")
+  return moved
 
-  finally:
-    try:
-      es.close_point_in_time(body={"id": pit_id})
-    except Exception:
-      pass
+
+def run_full_sync(es: Elasticsearch, conn) -> int:
+  moved = 0
+  after = None
+  batch_docs: List[Dict[str, Any]] = []
+  max_ts = datetime(1970, 1, 1, tzinfo=timezone.utc)
+  max_id = ""
+
+  while True:
+    res = fetch_batch(es, after, None)
+    hits = res.get("hits", {}).get("hits", [])
+    if not hits:
+      break
+
+    for h in hits:
+      src = h.get("_source", {})
+      ts_raw = src.get("@timestamp")
+      doc_id = src.get("source_doc_id")
+      if not ts_raw or not doc_id:
+        continue
+
+      ts = parse_ts(ts_raw)
+      if (ts, doc_id) > (max_ts, max_id):
+        max_ts, max_id = ts, doc_id
+      batch_docs.append(src)
+
+    if batch_docs:
+      upsert_rows(conn, batch_docs)
+      conn.commit()
+      moved += len(batch_docs)
+      batch_docs = []
+
+    after = hits[-1].get("sort")
+
+  if max_id:
+    set_checkpoint(conn, max_ts, max_id)
+    conn.commit()
 
   return moved
 
 
 def main() -> None:
   es = Elasticsearch(
-    ES_URL,
+    ES_URLS,
     basic_auth=(ES_USERNAME, ES_PASSWORD),
     ca_certs=ES_CA_CERT,
     verify_certs=True,
     request_timeout=60,
+    retry_on_timeout=True,
+    max_retries=5,
   )
+
+  initial_full_sync_done = False
 
   while True:
     try:
       with psycopg2.connect(PG_DSN) as conn:
         conn.autocommit = False
-        moved = run_once(es, conn)
-      print(f"ETL cycle complete. moved={moved}", flush=True)
+        if FULL_SYNC_ON_START and not initial_full_sync_done:
+          moved = run_full_sync(es, conn)
+          initial_full_sync_done = True
+          print(f"ETL full sync complete. moved={moved}", flush=True)
+        else:
+          moved = run_once(es, conn)
+          print(f"ETL cycle complete. moved={moved}", flush=True)
     except Exception as exc:
-      print(f"ETL error: {exc}", flush=True)
+      print(f"ETL error: {type(exc).__name__}: {exc}", flush=True)
     time.sleep(POLL_SECONDS)
 
 

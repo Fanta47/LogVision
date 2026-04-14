@@ -262,11 +262,12 @@ services:
    restart: on-failure
 
  postgres:
-   image: postgres:18
+   image: postgres:17
    environment:
      - POSTGRES_DB=logs
      - POSTGRES_USER=logs_user
      - POSTGRES_PASSWORD=logs_pass
+     - PGDATA=/var/lib/postgresql/data/pgdata
    ports:
      - "55432:5432"
    volumes:
@@ -282,7 +283,7 @@ services:
  etl_service:
    build: ./etl_service
    environment:
-     - ES_URL=https://es01:9200
+     - ES_URLS=https://es01:9200
      - ES_INDEX=log-unified-*
      - ES_USERNAME=elastic
      - ES_PASSWORD=changeme123
@@ -291,12 +292,17 @@ services:
      - POLL_SECONDS=5
      - BATCH_SIZE=1000
      - PIPELINE_NAME=es_to_pg
+     - FULL_SYNC_ON_START=true
    volumes:
      - certs:/certs:ro
    depends_on:
      postgres:
        condition: service_healthy
      es01:
+       condition: service_healthy
+     es02:
+       condition: service_healthy
+     es03:
        condition: service_healthy
    restart: unless-stopped
 

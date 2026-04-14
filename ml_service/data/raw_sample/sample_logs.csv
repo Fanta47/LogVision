@@ -1,0 +1,7 @@
+timestamp,application_key,level,host,user,message
+2024-01-01T12:00:00Z,app-A,INFO,host1,alice,Starting process
+2024-01-01T12:00:01Z,app-A,ERROR,host1,alice,Failed to open socket
+2024-01-01T12:00:02Z,app-A,INFO,host1,alice,Retrying connection
+2024-01-01T12:05:00Z,app-B,INFO,host2,bob,Job scheduled
+2024-01-01T12:05:05Z,app-B,WARN,host2,bob,Execution delayed
+2024-01-01T12:06:00Z,app-B,INFO,host2,bob,Job finished

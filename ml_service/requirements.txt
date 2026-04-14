@@ -1,0 +1,13 @@
+torch
+torchvision
+torchaudio
+transformers
+pandas
+numpy
+scikit-learn
+psycopg[binary]
+sqlalchemy
+python-dotenv
+tqdm
+jupyter
+matplotlib

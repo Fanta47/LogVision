@@ -15,9 +15,9 @@ volumes:
    driver: local
 
 networks:
- default:
-   name: elastic
-   external: false
+  default:
+    name: logvision_elastic
+    external: false
 
 services:
  setup:
@@ -98,7 +98,7 @@ services:
      - certs:/usr/share/elasticsearch/config/certs
      - esdata01:/usr/share/elasticsearch/data
    ports:
-     - 9201:9200
+     - 9211:9200
    environment:
      - node.name=es01
      - cluster.name=${CLUSTER_NAME}
@@ -145,7 +145,7 @@ services:
      - certs:/usr/share/elasticsearch/config/certs
      - esdata02:/usr/share/elasticsearch/data
    ports:
-     - 9202:9200
+     - 9212:9200
    environment:
      - node.name=es02
      - cluster.name=${CLUSTER_NAME}
@@ -192,7 +192,7 @@ services:
      - certs:/usr/share/elasticsearch/config/certs
      - esdata03:/usr/share/elasticsearch/data
    ports:
-     - 9203:9200
+     - 9213:9200
    environment:
      - node.name=es03
      - cluster.name=${CLUSTER_NAME}

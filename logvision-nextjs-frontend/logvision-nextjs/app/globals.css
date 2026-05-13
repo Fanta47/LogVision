@@ -1,0 +1,162 @@
+/* Global styles + Vermeg theme (dark-first) */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* --- Vermeg theme and utilities (provided by user) --- */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@400;600&display=swap');
+
+:root {
+  --radius: 0.5rem;
+  --background: oklch(0.13 0.015 250);
+  --foreground: oklch(0.93 0.01 250);
+  --card: oklch(0.17 0.015 250);
+  --card-foreground: oklch(0.93 0.01 250);
+  --primary: oklch(0.63 0.22 25);
+  --primary-foreground: oklch(0.98 0.005 250);
+  --secondary: oklch(0.2 0.015 250);
+  --muted: oklch(0.22 0.012 250);
+  --accent: oklch(0.22 0.02 250);
+  --destructive: oklch(0.63 0.22 25);
+  --success: oklch(0.7 0.17 155);
+  --warning: oklch(0.78 0.16 75);
+  --surface: oklch(0.15 0.015 250);
+  --border: oklch(1 0 0 / 8%);
+  --input: oklch(1 0 0 / 10%);
+  --ring: oklch(0.63 0.22 25);
+  --chart-1: oklch(0.75 0.15 195);
+  --sidebar: oklch(0.11 0.015 250);
+}
+
+@layer base {
+  * { box-sizing: border-box; }
+  html, body, #__next { height: 100%; }
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial;
+  }
+  .glass-card { background: oklch(1 0 0 / 3%); border: 1px solid oklch(1 0 0 / 6%); backdrop-filter: blur(12px); }
+}
+
+/* Status dots */
+.status-dot { width: 8px; height: 8px; border-radius: 50%; }
+.status-dot-critical { background: var(--destructive); box-shadow: 0 0 8px oklch(0.63 0.22 25 / 50%); }
+.status-dot-warning { background: var(--warning); box-shadow: 0 0 8px oklch(0.78 0.16 75 / 50%); }
+.status-dot-success { background: var(--success); box-shadow: 0 0 8px oklch(0.7 0.17 155 / 50%); }
+
+/* small animations */
+@keyframes slide-up { from { opacity:0; transform: translateY(8px);} to { opacity:1; transform:none; } }
+.animate-slide-up { animation: slide-up 0.28s ease-out; }
+
+/* login / hero visual pieces used by logo */
+.vermeg-logo-slash { filter: drop-shadow(0 0 14px rgba(255,90,90,0.35)); }
+.vermeg-logo-text { -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+
+/* small helpers to make feed readable */
+.muted-foreground { color: rgba(255,255,255,0.65); }
+@import "tailwindcss";
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-critical: var(--critical);
+  --color-surface: var(--surface);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-border: var(--sidebar-border);
+  --font-display: "Inter", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", monospace;
+}
+
+:root {
+  --radius: 0.5rem;
+  --background: oklch(0.13 0.015 250);
+  --foreground: oklch(0.93 0.01 250);
+  --card: oklch(0.17 0.015 250);
+  --card-foreground: oklch(0.93 0.01 250);
+  --popover: oklch(0.17 0.015 250);
+  --popover-foreground: oklch(0.93 0.01 250);
+  --primary: oklch(0.63 0.22 25);
+  --primary-foreground: oklch(0.98 0.005 250);
+  --secondary: oklch(0.2 0.015 250);
+  --secondary-foreground: oklch(0.85 0.01 250);
+  --muted: oklch(0.22 0.012 250);
+  --muted-foreground: oklch(0.6 0.02 250);
+  --accent: oklch(0.22 0.02 250);
+  --accent-foreground: oklch(0.93 0.01 250);
+  --success: oklch(0.7 0.17 155);
+  --warning: oklch(0.78 0.16 75);
+  --critical: oklch(0.63 0.22 25);
+  --surface: oklch(0.15 0.015 250);
+  --border: oklch(1 0 0 / 8%);
+  --input: oklch(1 0 0 / 10%);
+  --ring: oklch(0.63 0.22 25);
+  --sidebar: oklch(0.11 0.015 250);
+  --sidebar-foreground: oklch(0.7 0.02 250);
+  --sidebar-accent: oklch(0.18 0.02 250);
+  --sidebar-border: oklch(1 0 0 / 6%);
+}
+
+* { border-color: var(--border); }
+body { background: var(--background); color: var(--foreground); font-family: var(--font-display); }
+::selection { background: oklch(0.63 0.22 25 / 30%); }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: oklch(1 0 0 / 12%); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: oklch(1 0 0 / 20%); }
+
+.glass-card { background: oklch(1 0 0 / 3%); border: 1px solid oklch(1 0 0 / 6%); backdrop-filter: blur(12px); }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; }
+.status-dot-critical { background: var(--critical); box-shadow: 0 0 8px oklch(0.63 0.22 25 / 50%); }
+.status-dot-warning { background: var(--warning); box-shadow: 0 0 8px oklch(0.78 0.16 75 / 50%); }
+.status-dot-success { background: var(--success); box-shadow: 0 0 8px oklch(0.7 0.17 155 / 50%); }
+.animate-slide-up { animation: slide-up 0.3s ease-out; }
+@keyframes slide-up { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+.login-bg { background: radial-gradient(ellipse at 20% 10%, oklch(0.22 0.04 260 / 0.55), transparent 55%), radial-gradient(ellipse at 85% 90%, oklch(0.20 0.05 25 / 0.45), transparent 55%), linear-gradient(180deg, oklch(0.13 0.02 250) 0%, oklch(0.10 0.015 250) 100%); }
+.aurora { position: absolute; border-radius: 50%; filter: blur(90px); opacity: 0.55; }
+.aurora-1 { width: 620px; height: 620px; top: -160px; left: -120px; background: radial-gradient(circle, oklch(0.63 0.22 25 / 0.55) 0%, transparent 70%); }
+.aurora-2 { width: 720px; height: 720px; bottom: -220px; right: -180px; background: radial-gradient(circle, oklch(0.65 0.18 230 / 0.45) 0%, transparent 70%); }
+.aurora-3 { width: 480px; height: 480px; top: 40%; left: 45%; transform: translate(-50%, -50%); background: radial-gradient(circle, oklch(0.7 0.15 280 / 0.30) 0%, transparent 70%); }
+.aurora-1 { animation: aurora-drift-1 14s ease-in-out infinite alternate; }
+.aurora-2 { animation: aurora-drift-2 18s ease-in-out infinite alternate; }
+.aurora-3 { animation: aurora-pulse 9s ease-in-out infinite; }
+.animate-pulse-glow { animation: pulse-glow 2.2s ease-in-out infinite; }
+.login-grid { position: absolute; inset: 0; pointer-events: none; opacity: 0.22; background-image: linear-gradient(oklch(1 0 0 / 8%) 1px, transparent 1px), linear-gradient(90deg, oklch(1 0 0 / 8%) 1px, transparent 1px); background-size: 44px 44px; animation: grid-drift 28s linear infinite; }
+.login-sweep { position: absolute; inset: -20%; pointer-events: none; background: linear-gradient(110deg, transparent 40%, oklch(0.65 0.18 25 / 0.12) 50%, transparent 60%); animation: sweep 8s linear infinite; }
+.login-particles { position: absolute; inset: 0; pointer-events: none; opacity: 0.28; background-image: radial-gradient(oklch(1 0 0 / 30%) 1px, transparent 1px); background-size: 42px 42px; animation: particle-float 22s linear infinite; }
+.vermeg-animated-logo { display: inline-flex; align-items: center; gap: 0.6rem; overflow: hidden; }
+.vermeg-slash { animation: slash-in 0.7s ease-out both, slash-glow 2.6s ease-in-out 0.7s infinite; }
+.vermeg-wordmark { animation: vermeg-slide-out 0.9s ease-out 0.2s both; }
+@keyframes pulse-glow { 0%,100% { box-shadow: 0 0 8px oklch(0.63 0.22 25 / 38%);} 50% { box-shadow: 0 0 18px oklch(0.63 0.22 25 / 65%);} }
+@keyframes aurora-drift-1 { from { transform: translate(0,0) scale(1);} to { transform: translate(36px,-24px) scale(1.08);} }
+@keyframes aurora-drift-2 { from { transform: translate(0,0) scale(1);} to { transform: translate(-28px,30px) scale(1.05);} }
+@keyframes aurora-pulse { 0%,100% { opacity:.22; } 50% { opacity: .42; } }
+@keyframes grid-drift { from { transform: translateY(0);} to { transform: translateY(44px);} }
+@keyframes sweep { from { transform: translateX(-50%);} to { transform: translateX(50%);} }
+@keyframes particle-float { from { transform: translateY(0);} to { transform: translateY(-22px);} }
+@keyframes slash-in { from { opacity: 0; transform: translateX(-20px) scale(.9);} to { opacity:1; transform: translateX(0) scale(1);} }
+@keyframes slash-glow { 0%,100% { filter: drop-shadow(0 0 0 oklch(0.63 0.22 25 / 0)); } 50% { filter: drop-shadow(0 0 9px oklch(0.63 0.22 25 / .65)); } }
+@keyframes vermeg-slide-out { from { opacity: 0; transform: translateX(18px);} to { opacity:1; transform: translateX(0);} }

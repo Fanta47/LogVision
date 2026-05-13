@@ -11,6 +11,8 @@ volumes:
    driver: local
  logstashdata01:
    driver: local
+ uploadsdata:
+   driver: local
  pgdata:
    driver: local
 
@@ -280,11 +282,30 @@ services:
      retries: 12
    restart: unless-stopped
 
+ backend:
+   build: ./backend
+   environment:
+     - APP_ENV=docker
+     - PG_HOST=postgres
+     - PG_PORT=5432
+     - PG_DB=logs
+     - PG_USER=logs_user
+     - PG_PASSWORD=logs_pass
+     - UPLOAD_ROOT=/app/uploads/raw
+   volumes:
+     - uploadsdata:/app/uploads
+   ports:
+     - "8000:8000"
+   depends_on:
+     postgres:
+       condition: service_healthy
+   restart: unless-stopped
+
  etl_service:
    build: ./etl_service
    environment:
      - ES_URLS=https://es01:9200
-     - ES_INDEX=log-unified-*
+     - ES_INDEX=lvlogs-*
      - ES_USERNAME=elastic
      - ES_PASSWORD=changeme123
      - ES_CA_CERT=/certs/ca/ca.crt
@@ -317,7 +338,8 @@ services:
    volumes:
      - logstashdata01:/usr/share/logstash/data
      - certs:/usr/share/logstash/certs
-     - ./uploads:/usr/share/logstash/uploads
+     - uploadsdata:/usr/share/logstash/uploads
+     - ./uploads:/usr/share/logstash/host_uploads
      - ./logstash/pipeline:/usr/share/logstash/pipeline
    environment:
      - NODE_NAME="logstash"
@@ -332,8 +354,9 @@ services:
    mem_limit: ${LS_MEM_LIMIT}
    cpus: 1.5
    healthcheck:
-     test: ["CMD-SHELL", "curl -s -f http://localhost:9600 > /dev/null"]
+     test: ["CMD-SHELL", "curl -s -f http://127.0.0.1:9600/_node/pipelines > /dev/null"]
+     start_period: 90s
      interval: 10s
      timeout: 10s
-     retries: 5
+     retries: 12
    restart: on-failure

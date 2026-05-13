@@ -1,0 +1,3 @@
+export default function ManagerPage() {
+  return <div className="space-y-6"><div><h1 className="text-xl font-bold">Manager Console</h1><p className="mt-1 text-sm text-muted-foreground">Strategic view of risk, SLA adherence, and backlog pressure.</p></div><div className="grid gap-4 md:grid-cols-2"><div className="glass-card animate-slide-up rounded-lg p-5"><h2 className="font-medium">Team Risk</h2><p className="mt-2 text-sm text-muted-foreground">Cross-service anomaly risk and backlog.</p></div><div className="glass-card animate-slide-up rounded-lg p-5"><h2 className="font-medium">SLA Compliance</h2><p className="mt-2 text-sm text-muted-foreground">SLA status by application and component.</p></div></div></div>;
+}

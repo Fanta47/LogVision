@@ -1,13 +1,12 @@
 torch
-torchvision
-torchaudio
 transformers
+datasets
+scikit-learn
 pandas
 numpy
-scikit-learn
-psycopg[binary]
 sqlalchemy
+psycopg2-binary
 python-dotenv
+joblib
 tqdm
-jupyter
 matplotlib

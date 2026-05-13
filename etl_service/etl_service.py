@@ -1,4 +1,6 @@
+import hashlib
 import os
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -6,395 +8,314 @@ from typing import Any, Dict, List, Optional, Tuple
 import psycopg2
 from psycopg2.extras import execute_batch
 from elasticsearch import Elasticsearch
+from elasticsearch.exceptions import BadRequestError
 
 ES_URLS_RAW = os.getenv("ES_URLS", os.getenv("ES_URL", "https://es01:9200"))
 ES_URLS = [u.strip() for u in ES_URLS_RAW.split(",") if u.strip()]
-ES_INDEX = os.getenv("ES_INDEX", "log-unified-*")
+ES_INDEX = os.getenv("ES_INDEX", "logvision-events-*")
 ES_USERNAME = os.getenv("ES_USERNAME", "elastic")
 ES_PASSWORD = os.getenv("ES_PASSWORD", "changeme123")
 ES_CA_CERT = os.getenv("ES_CA_CERT", "/certs/ca/ca.crt")
-
 PG_DSN = os.getenv("PG_DSN", "postgresql://logs_user:logs_pass@postgres:5432/logs")
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "5"))
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "1000"))
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "500"))
 PIPELINE_NAME = os.getenv("PIPELINE_NAME", "es_to_pg")
-FULL_SYNC_ON_START = os.getenv("FULL_SYNC_ON_START", "true").strip().lower() == "true"
+FULL_SYNC_ON_START = os.getenv("FULL_SYNC_ON_START", "false").lower() in ("1", "true", "yes", "on")
+
+DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}/\d{1,2}/\d{2,4}\b")
+IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+NUM_RE = re.compile(r"\b\d+\b")
+PATH_RE = re.compile(r"([A-Za-z]:\\[^\s]+|/[^\s]+)")
+HEX_RE = re.compile(r"\b[a-fA-F0-9]{12,}\b")
+SPACE_RE = re.compile(r"\s+")
 
 
 def parse_ts(value: str) -> datetime:
-  if value.endswith("Z"):
-    value = value[:-1] + "+00:00"
-  dt = datetime.fromisoformat(value)
-  if dt.tzinfo is None:
-    dt = dt.replace(tzinfo=timezone.utc)
-  return dt
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
-def bool_or_none(v: Any) -> Optional[bool]:
-  if v is None:
-    return None
-  if isinstance(v, bool):
-    return v
-  s = str(v).strip().lower()
-  if s == "true":
-    return True
-  if s == "false":
-    return False
-  return None
+def normalize_details(text: Optional[str]) -> str:
+    if not text:
+        return ""
+    out = DATE_RE.sub("<DATE>", text)
+    out = IP_RE.sub("<IP>", out)
+    out = PATH_RE.sub("<PATH>", out)
+    out = HEX_RE.sub("<HEX>", out)
+    out = NUM_RE.sub("<NUM>", out)
+    return SPACE_RE.sub(" ", out).strip()
 
 
-def int_or_none(v: Any) -> Optional[int]:
-  if v in (None, ""):
-    return None
-  try:
-    return int(v)
-  except Exception:
-    return None
+def build_event_uid(d: Dict[str, Any]) -> str:
+    parts = [
+        str(d.get("@timestamp", "")),
+        str(d.get("application_key", "")),
+        str(d.get("component_name", "")),
+        str(d.get("thread_name", "")),
+        str(d.get("details", "")),
+        str(d.get("source_path", "")),
+    ]
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
-def get_checkpoint(conn) -> Tuple[datetime, str]:
-  with conn.cursor() as cur:
-    cur.execute(
-      """
-      SELECT last_event_timestamp, last_source_doc_id
-      FROM etl_checkpoint
-      WHERE pipeline_name = %s
-      """,
-      (PIPELINE_NAME,),
-    )
-    row = cur.fetchone()
-    if row:
-      return row[0], row[1]
-  return datetime(1970, 1, 1, tzinfo=timezone.utc), ""
+def get_watermark(conn) -> Tuple[datetime, str]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT last_event_timestamp, last_source_doc_id FROM etl_watermark WHERE pipeline_name=%s", (PIPELINE_NAME,))
+        row = cur.fetchone()
+        if row:
+            return row[0], row[1]
+    return datetime(1970, 1, 1, tzinfo=timezone.utc), ""
 
 
-def set_checkpoint(conn, ts: datetime, doc_id: str) -> None:
-  with conn.cursor() as cur:
-    cur.execute(
-      """
-      INSERT INTO etl_checkpoint(pipeline_name, last_event_timestamp, last_source_doc_id, updated_at)
-      VALUES (%s, %s, %s, NOW())
-      ON CONFLICT (pipeline_name) DO UPDATE
-      SET last_event_timestamp = EXCLUDED.last_event_timestamp,
-          last_source_doc_id = EXCLUDED.last_source_doc_id,
-          updated_at = NOW()
-      """,
-      (PIPELINE_NAME, ts, doc_id),
-    )
-
-
-def upsert_rows(conn, rows: List[Dict[str, Any]]) -> Tuple[datetime, str]:
-  base_rows = []
-  sql_rows = []
-  sched_rows = []
-  err_rows = []
-
-  for d in rows:
-    base_rows.append(
-      (
-        d.get("source_doc_id"),
-        parse_ts(d["@timestamp"]),
-        d.get("application_name") or "unknown_application",
-        d.get("application_key") or "unknown",
-        d.get("application_group") or "unknown",
-        d.get("log_level"),
-        d.get("log_origin"),
-        d.get("thread"),
-        d.get("log_family") or "unknown",
-        d.get("event_type") or "generic",
-        d.get("parse_status") or "unknown",
-        d.get("parse_confidence") or "unknown",
-        d.get("analysis_status"),
-        d.get("source_file"),
-        d.get("context"),
-        d.get("details"),
-      )
-    )
-
-    if d.get("log_family") == "sql_persistence":
-      sql_rows.append(
-        (
-          d.get("source_doc_id"),
-          d.get("query_stage"),
-          d.get("query_text"),
-          d.get("sql_operation"),
-          d.get("sql_table"),
-          bool_or_none(d.get("query_has_placeholders")),
-          d.get("main_entity_id"),
-          d.get("sql_entity_family"),
-          int_or_none(d.get("result_size")),
-          int_or_none(d.get("update_count")),
-          d.get("data_source"),
+def ensure_schema(conn) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS etl_watermark (
+              pipeline_name VARCHAR(128) PRIMARY KEY,
+              last_event_timestamp TIMESTAMPTZ NOT NULL DEFAULT '1970-01-01 00:00:00+00',
+              last_source_doc_id TEXT NOT NULL DEFAULT '',
+              updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
         )
-      )
-
-    if d.get("log_family") == "scheduler_controller":
-      sched_rows.append(
-        (
-          d.get("source_doc_id"),
-          int_or_none(d.get("worker_id")),
-          d.get("criterion"),
-          d.get("controller_name"),
-          d.get("method_name"),
-          d.get("method_display_name"),
-          d.get("service_domain"),
+        cur.execute(
+            """
+            ALTER TABLE base_event
+              ADD COLUMN IF NOT EXISTS id BIGSERIAL,
+              ADD COLUMN IF NOT EXISTS event_uid VARCHAR(128),
+              ADD COLUMN IF NOT EXISTS es_id VARCHAR(256),
+              ADD COLUMN IF NOT EXISTS upload_uid VARCHAR(128),
+              ADD COLUMN IF NOT EXISTS application_key VARCHAR(100),
+              ADD COLUMN IF NOT EXISTS component_name VARCHAR(150),
+              ADD COLUMN IF NOT EXISTS platform VARCHAR(120),
+              ADD COLUMN IF NOT EXISTS environment VARCHAR(120),
+              ADD COLUMN IF NOT EXISTS scope VARCHAR(120),
+              ADD COLUMN IF NOT EXISTS thread_name VARCHAR(255),
+              ADD COLUMN IF NOT EXISTS normalized_details TEXT,
+              ADD COLUMN IF NOT EXISTS details_hash VARCHAR(128),
+              ADD COLUMN IF NOT EXISTS source_path TEXT,
+              ADD COLUMN IF NOT EXISTS stored_file_name VARCHAR(255),
+              ADD COLUMN IF NOT EXISTS original_file_name VARCHAR(255),
+              ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()
+            """
         )
-      )
-
-    if d.get("log_family") == "application_error":
-      err_rows.append(
-        (
-          d.get("source_doc_id"),
-          d.get("error_message"),
-          d.get("exception_class"),
-          d.get("root_exception_class"),
-          d.get("error_keyword"),
-          int_or_none(d.get("caused_by_count")),
-          d.get("stack_trace"),
+        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_base_event_event_uid ON base_event(event_uid)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sla_event (
+              base_event_id BIGINT PRIMARY KEY,
+              caller_class TEXT,
+              caller_method TEXT,
+              caller_line INT,
+              sla_class_name TEXT,
+              context_raw TEXT,
+              sla_status VARCHAR(32),
+              sla_result_pk TEXT
+            )
+            """
         )
-      )
-
-  with conn.cursor() as cur:
-    execute_batch(
-      cur,
-      """
-      INSERT INTO base_event(
-        source_doc_id, event_timestamp, application_name, application_key, application_group,
-        log_level, log_origin, thread, log_family, event_type,
-        parse_status, parse_confidence, analysis_status, source_file, context, details
-      )
-      VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-      ON CONFLICT (source_doc_id) DO UPDATE
-      SET event_timestamp = EXCLUDED.event_timestamp,
-          application_name = EXCLUDED.application_name,
-          application_key = EXCLUDED.application_key,
-          application_group = EXCLUDED.application_group,
-          log_level = EXCLUDED.log_level,
-          log_origin = EXCLUDED.log_origin,
-          thread = EXCLUDED.thread,
-          log_family = EXCLUDED.log_family,
-          event_type = EXCLUDED.event_type,
-          parse_status = EXCLUDED.parse_status,
-          parse_confidence = EXCLUDED.parse_confidence,
-          analysis_status = EXCLUDED.analysis_status,
-          source_file = EXCLUDED.source_file,
-          context = EXCLUDED.context,
-          details = EXCLUDED.details
-      """,
-      base_rows,
-      page_size=500,
-    )
-
-    if sql_rows:
-      execute_batch(
-        cur,
-        """
-        INSERT INTO sql_event(
-          source_doc_id, query_stage, query_text, sql_operation, sql_table,
-          query_has_placeholders, main_entity_id, sql_entity_family,
-          result_size, update_count, data_source
+        cur.execute(
+            """
+            ALTER TABLE sql_event
+              ADD COLUMN IF NOT EXISTS base_event_id BIGINT,
+              ADD COLUMN IF NOT EXISTS sql_query TEXT,
+              ADD COLUMN IF NOT EXISTS normalized_sql_query TEXT,
+              ADD COLUMN IF NOT EXISTS table_name TEXT,
+              ADD COLUMN IF NOT EXISTS query_length INT,
+              ADD COLUMN IF NOT EXISTS estimated_complexity_score NUMERIC(10,4)
+            """
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (source_doc_id) DO UPDATE
-        SET query_stage = EXCLUDED.query_stage,
-            query_text = EXCLUDED.query_text,
-            sql_operation = EXCLUDED.sql_operation,
-            sql_table = EXCLUDED.sql_table,
-            query_has_placeholders = EXCLUDED.query_has_placeholders,
-            main_entity_id = EXCLUDED.main_entity_id,
-            sql_entity_family = EXCLUDED.sql_entity_family,
-            result_size = EXCLUDED.result_size,
-            update_count = EXCLUDED.update_count,
-            data_source = EXCLUDED.data_source
-        """,
-        sql_rows,
-        page_size=500,
-      )
 
-    if sched_rows:
-      execute_batch(
-        cur,
-        """
-        INSERT INTO scheduler_controller_event(
-          source_doc_id, worker_id, criterion, controller_name,
-          method_name, method_display_name, service_domain
+
+def set_watermark(conn, ts: datetime, doc_id: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO etl_watermark(pipeline_name, last_event_timestamp, last_source_doc_id, updated_at)
+            VALUES (%s, %s, %s, NOW())
+            ON CONFLICT (pipeline_name) DO UPDATE
+            SET last_event_timestamp=EXCLUDED.last_event_timestamp,
+                last_source_doc_id=EXCLUDED.last_source_doc_id,
+                updated_at=NOW()
+            """,
+            (PIPELINE_NAME, ts, doc_id),
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (source_doc_id) DO UPDATE
-        SET worker_id = EXCLUDED.worker_id,
-            criterion = EXCLUDED.criterion,
-            controller_name = EXCLUDED.controller_name,
-            method_name = EXCLUDED.method_name,
-            method_display_name = EXCLUDED.method_display_name,
-            service_domain = EXCLUDED.service_domain
-        """,
-        sched_rows,
-        page_size=500,
-      )
-
-    if err_rows:
-      execute_batch(
-        cur,
-        """
-        INSERT INTO error_event(
-          source_doc_id, error_message, exception_class,
-          root_exception_class, error_keyword, caused_by_count, stack_trace
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (source_doc_id) DO UPDATE
-        SET error_message = EXCLUDED.error_message,
-            exception_class = EXCLUDED.exception_class,
-            root_exception_class = EXCLUDED.root_exception_class,
-            error_keyword = EXCLUDED.error_keyword,
-            caused_by_count = EXCLUDED.caused_by_count,
-            stack_trace = EXCLUDED.stack_trace
-        """,
-        err_rows,
-        page_size=500,
-      )
-
-  last = rows[-1]
-  return parse_ts(last["@timestamp"]), last.get("source_doc_id", "")
 
 
-def fetch_batch(
-  es: Elasticsearch,
-  after: Optional[List[Any]],
-  last_ts: Optional[datetime],
-) -> Dict[str, Any]:
-  query = {
-    "size": BATCH_SIZE,
-    "track_total_hits": False,
-    "sort": [
-      {"@timestamp": {"order": "asc", "format": "strict_date_optional_time_nanos"}},
-      {"source_doc_id.keyword": {"order": "asc"}},
-    ],
-  }
-  if last_ts is not None:
-    query["query"] = {
-      "range": {
-        "@timestamp": {
-          "gte": last_ts.isoformat()
-        }
-      }
+def fetch_batch(es: Elasticsearch, after: Optional[List[Any]], last_ts: datetime):
+    query = {
+        "size": BATCH_SIZE,
+        "sort": [
+            {"@timestamp": {"order": "asc", "format": "strict_date_optional_time_nanos"}},
+            {"_doc": {"order": "asc"}},
+        ],
+        "query": {"range": {"@timestamp": {"gte": last_ts.isoformat()}}},
     }
-  if after:
-    query["search_after"] = after
-  return es.search(
-    index=ES_INDEX,
-    body=query,
-    ignore_unavailable=True,
-    allow_no_indices=True,
-  )
-
-
-def run_once(es: Elasticsearch, conn) -> int:
-  last_ts, last_id = get_checkpoint(conn)
-  moved = 0
-
-  after = None
-  batch_docs: List[Dict[str, Any]] = []
-
-  while True:
-    res = fetch_batch(es, after, last_ts)
-    hits = res.get("hits", {}).get("hits", [])
-    if not hits:
-      break
-
-    for h in hits:
-      src = h.get("_source", {})
-      ts_raw = src.get("@timestamp")
-      doc_id = src.get("source_doc_id")
-      if not ts_raw or not doc_id:
-        continue
-
-      ts = parse_ts(ts_raw)
-      if (ts, doc_id) <= (last_ts, last_id):
-        continue
-
-      batch_docs.append(src)
-
-    if batch_docs:
-      new_ts, new_id = upsert_rows(conn, batch_docs)
-      set_checkpoint(conn, new_ts, new_id)
-      conn.commit()
-      moved += len(batch_docs)
-      last_ts, last_id = new_ts, new_id
-      batch_docs = []
-
-    after = hits[-1].get("sort")
-
-  return moved
-
-
-def run_full_sync(es: Elasticsearch, conn) -> int:
-  moved = 0
-  after = None
-  batch_docs: List[Dict[str, Any]] = []
-  max_ts = datetime(1970, 1, 1, tzinfo=timezone.utc)
-  max_id = ""
-
-  while True:
-    res = fetch_batch(es, after, None)
-    hits = res.get("hits", {}).get("hits", [])
-    if not hits:
-      break
-
-    for h in hits:
-      src = h.get("_source", {})
-      ts_raw = src.get("@timestamp")
-      doc_id = src.get("source_doc_id")
-      if not ts_raw or not doc_id:
-        continue
-
-      ts = parse_ts(ts_raw)
-      if (ts, doc_id) > (max_ts, max_id):
-        max_ts, max_id = ts, doc_id
-      batch_docs.append(src)
-
-    if batch_docs:
-      upsert_rows(conn, batch_docs)
-      conn.commit()
-      moved += len(batch_docs)
-      batch_docs = []
-
-    after = hits[-1].get("sort")
-
-  if max_id:
-    set_checkpoint(conn, max_ts, max_id)
-    conn.commit()
-
-  return moved
-
-
-def main() -> None:
-  es = Elasticsearch(
-    ES_URLS,
-    basic_auth=(ES_USERNAME, ES_PASSWORD),
-    ca_certs=ES_CA_CERT,
-    verify_certs=True,
-    request_timeout=60,
-    retry_on_timeout=True,
-    max_retries=5,
-  )
-
-  initial_full_sync_done = False
-
-  while True:
+    if after:
+        query["search_after"] = after
     try:
-      with psycopg2.connect(PG_DSN) as conn:
-        conn.autocommit = False
-        if FULL_SYNC_ON_START and not initial_full_sync_done:
-          moved = run_full_sync(es, conn)
-          initial_full_sync_done = True
-          print(f"ETL full sync complete. moved={moved}", flush=True)
-        else:
-          moved = run_once(es, conn)
-          print(f"ETL cycle complete. moved={moved}", flush=True)
-    except Exception as exc:
-      print(f"ETL error: {type(exc).__name__}: {exc}", flush=True)
-    time.sleep(POLL_SECONDS)
+        return es.search(index=ES_INDEX, body=query, ignore_unavailable=True, allow_no_indices=True)
+    except BadRequestError as exc:
+        print(f"ES search failed. index={ES_INDEX} sort={query['sort']} after={after} error={exc}", flush=True)
+        raise
+
+
+def upsert_rows(conn, rows: List[Dict[str, Any]]) -> Tuple[datetime, str, int]:
+    inserted = 0
+    sql_rows = []
+    sla_rows = []
+    last_ts = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    last_id = ""
+
+    with conn.cursor() as cur:
+        for d in rows:
+            es_id = d.get("_id", "")
+            src = d.get("_source", {})
+            ts_raw = src.get("@timestamp")
+            if not ts_raw:
+                continue
+            ts = parse_ts(ts_raw)
+            app_key = src.get("application_key") or src.get("application_name") or "unknown_app"
+            component = src.get("component_name") or src.get("application_group") or "unknown_component"
+            log_family = src.get("log_family") or "unknown"
+            event_type = src.get("event_type") or "unknown"
+            parse_status = src.get("parse_status") or "ok"
+            parse_confidence = src.get("parse_confidence") or "1.0"
+            event_uid = build_event_uid(src)
+            source_doc_id = event_uid  # Use event_uid as primary key
+            details = src.get("details", "")
+            normalized = normalize_details(details)
+            details_hash = hashlib.sha256((details or "").encode("utf-8")).hexdigest()
+
+            cur.execute(
+                """
+                INSERT INTO base_event(
+                  event_uid, es_id, source_doc_id, upload_uid, event_timestamp, application_key, component_name,
+                  application_name, application_group, parse_status, parse_confidence,
+                  platform, environment, scope, log_level, log_family, event_type, thread_name,
+                  details, normalized_details, details_hash, source_path, stored_file_name, original_file_name, created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (event_uid) DO NOTHING
+                RETURNING id
+                """,
+                (
+                    event_uid,
+                    es_id,
+                    source_doc_id,
+                    src.get("upload_uid"),
+                    ts,
+                    app_key,
+                    component,
+                    app_key,
+                    component,
+                    parse_status,
+                    parse_confidence,
+                    src.get("platform"),
+                    src.get("environment"),
+                    src.get("scope"),
+                    src.get("log_level"),
+                    log_family,
+                    event_type,
+                    src.get("thread_name"),
+                    details,
+                    normalized,
+                    details_hash,
+                    src.get("source_path"),
+                    src.get("stored_file_name"),
+                    src.get("original_file_name"),
+                ),
+            )
+            row = cur.fetchone()
+            cur.execute(
+                """
+                UPDATE base_event
+                SET application_name = COALESCE(application_name, %s),
+                    application_group = COALESCE(application_group, %s),
+                    log_family = COALESCE(log_family, %s),
+                    event_type = COALESCE(event_type, %s),
+                    parse_status = COALESCE(parse_status, %s),
+                    parse_confidence = COALESCE(parse_confidence, %s)
+                WHERE event_uid = %s
+                """,
+                (app_key, component, log_family, event_type, parse_status, parse_confidence, event_uid),
+            )
+            if not row:
+                continue
+
+            base_event_id = row[0]
+            inserted += 1
+            if log_family == "persistence":
+                sql_query = src.get("sql_query")
+                normalized_sql_query = normalize_details(sql_query)
+                qlen = len(sql_query) if sql_query else 0
+                sql_rows.append((base_event_id, src.get("event_type"), sql_query, normalized_sql_query, src.get("table_name"), src.get("result_size"), src.get("data_source"), qlen, min(1.0, qlen / 2000.0)))
+            elif log_family == "sla":
+                sla_rows.append((base_event_id, src.get("caller_class"), src.get("caller_method"), src.get("caller_line"), src.get("sla_class_name"), src.get("context_raw"), src.get("sla_status"), src.get("sla_result_pk")))
+
+            if src.get("upload_uid"):
+                cur.execute("UPDATE log_upload SET status='processed' WHERE upload_uid=%s", (src.get("upload_uid"),))
+
+            last_ts = ts
+            last_id = es_id
+
+        if sql_rows:
+            execute_batch(cur, """
+                INSERT INTO sql_event(base_event_id, sql_operation, sql_query, normalized_sql_query, table_name, result_size, data_source, query_length, estimated_complexity_score)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (base_event_id) DO NOTHING
+            """, sql_rows, page_size=200)
+
+        if sla_rows:
+            execute_batch(cur, """
+                INSERT INTO sla_event(base_event_id, caller_class, caller_method, caller_line, sla_class_name, context_raw, sla_status, sla_result_pk)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (base_event_id) DO NOTHING
+            """, sla_rows, page_size=200)
+
+    return last_ts, last_id, inserted
+
+
+def main():
+    print(
+        f"Starting ETL with ES_INDEX={ES_INDEX}, ES_URLS={ES_URLS}, PG_DSN={PG_DSN}, PIPELINE_NAME={PIPELINE_NAME}, BATCH_SIZE={BATCH_SIZE}",
+        flush=True,
+    )
+    es = Elasticsearch(ES_URLS, basic_auth=(ES_USERNAME, ES_PASSWORD), ca_certs=ES_CA_CERT, verify_certs=True)
+    full_sync_done = False
+    while True:
+        try:
+            with psycopg2.connect(PG_DSN) as conn:
+                conn.autocommit = False
+                ensure_schema(conn)
+                if FULL_SYNC_ON_START and not full_sync_done:
+                    set_watermark(conn, datetime(1970, 1, 1, tzinfo=timezone.utc), "")
+                    print("FULL_SYNC_ON_START=true -> watermark reset to epoch", flush=True)
+                    conn.commit()
+                    full_sync_done = True
+                last_ts, last_id = get_watermark(conn)
+                after = None
+                moved = 0
+                while True:
+                    res = fetch_batch(es, after, last_ts)
+                    hits = res.get("hits", {}).get("hits", [])
+                    if not hits:
+                        break
+                    ts, doc_id, inserted = upsert_rows(conn, hits)
+                    if inserted > 0:
+                        set_watermark(conn, ts, doc_id or last_id)
+                    conn.commit()
+                    moved += inserted
+                    after = hits[-1].get("sort")
+                print(f"ETL cycle complete. moved={moved}", flush=True)
+        except Exception as exc:
+            print(f"ETL error: {type(exc).__name__}: {exc}", flush=True)
+        time.sleep(POLL_SECONDS)
 
 
 if __name__ == "__main__":
-  main()
+    main()
